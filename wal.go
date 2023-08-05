@@ -2,10 +2,13 @@ package wal
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
 	"go.uber.org/zap"
@@ -38,12 +41,14 @@ type WriteAheadLog struct {
 	currentSegmentID int
 
 	log *zap.Logger
+
+	curOffset int64
 }
 
 func NewWriteAheadLog(opts *WALOptions) (*WriteAheadLog, error) {
 	walLogFilePrefix := opts.LogDir + "wal"
 
-	firstLogFileName := walLogFilePrefix + ".0"
+	firstLogFileName := walLogFilePrefix + ".0.0" // prefix + . {segmentID} + . {starting_offset}
 	file, err := os.OpenFile(firstLogFileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
 	if err != nil {
 		return nil, err
@@ -65,24 +70,25 @@ func NewWriteAheadLog(opts *WALOptions) (*WriteAheadLog, error) {
 
 		maxSegments:      opts.MaxSegments,
 		currentSegmentID: 0,
+		curOffset:        -1,
 		log:              opts.log,
 	}, nil
 }
 
-func (wal *WriteAheadLog) Write(data []byte) (int64, error) {
+func (wal *WriteAheadLog) Write(data []byte) error {
 	wal.mu.Lock()
 	defer wal.mu.Unlock()
 
 	entrySize := 4 + len(data) // 4 bytes for the size prefix
 	if wal.logSize+int64(entrySize) > wal.maxLogSize {
 		if err := wal.rotateLog(); err != nil {
-			return 0, err
+			return err
 		}
 	}
 
-	offset, err := wal.file.Seek(0, io.SeekEnd)
+	_, err := wal.file.Seek(0, io.SeekEnd)
 	if err != nil {
-		return 0, err
+		return err
 	}
 
 	// Create a buffer to hold the log entry data
@@ -96,11 +102,12 @@ func (wal *WriteAheadLog) Write(data []byte) (int64, error) {
 
 	// Write the entire buffer to the file in a single system call
 	if _, err := wal.file.Write(buf); err != nil {
-		return 0, err
+		return err
 	}
 
 	wal.logSize += int64(entrySize)
-	return offset, nil
+	wal.curOffset++
+	return nil
 }
 
 func (wal *WriteAheadLog) Close() error {
@@ -110,11 +117,11 @@ func (wal *WriteAheadLog) Close() error {
 	return wal.file.Close()
 }
 
-func (wal *WriteAheadLog) GetOffset() (int64, error) {
+func (wal *WriteAheadLog) GetOffset() int64 {
 	wal.mu.Lock()
 	defer wal.mu.Unlock()
 
-	return wal.file.Seek(0, io.SeekEnd)
+	return wal.curOffset
 }
 
 func (wal *WriteAheadLog) rotateLog() error {
@@ -131,7 +138,7 @@ func (wal *WriteAheadLog) rotateLog() error {
 	wal.currentSegmentID++
 	wal.segmentCount++
 
-	newFileName := fmt.Sprintf("%s.%d", wal.logFileName, wal.currentSegmentID)
+	newFileName := fmt.Sprintf("%s.%d.%d", wal.logFileName, wal.currentSegmentID, wal.curOffset)
 
 	file, err := os.OpenFile(newFileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
 	if err != nil {
@@ -157,34 +164,78 @@ func (wal *WriteAheadLog) deleteOldestSegment() error {
 	return nil
 }
 
+func (wal *WriteAheadLog) findStartingLogFile(offset int64, files []string) (i int, previousOffset int64, err error) {
+	i = -1
+	for index, file := range files {
+		parts := strings.Split(file, ".")
+		startingOffsetStr := parts[len(parts)-1]
+		startingOffset, err = strconv.ParseInt(startingOffsetStr, 10, 64)
+		if err != nil {
+			return -1, -1, err
+		}
+		if previousOffset <= offset && offset <= startingOffset {
+			return index, previousOffset, nil
+		}
+		previousOffset = startingOffset
+	}
+	return -1, -1, errors.New("offset doesn't exsists")
+}
+
+func (wal *WriteAheadLog) seekOffset(offset int64, startingOffset int64, file io.ReadSeeker) (err error) {
+	var sizeByte = make([]byte, 4)
+	if _, err = file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+
+	for startingOffset < offset {
+		if _, err = io.ReadFull(file, sizeByte); err != nil {
+			return err
+		}
+		dataSize := binary.LittleEndian.Uint32(sizeByte)
+		totalEntrySize := int64(4 + dataSize)
+		if _, err = file.Seek(totalEntrySize, io.SeekCurrent); err != nil {
+			return err
+		}
+		startingOffset++
+	}
+	return err
+}
+
 func (wal *WriteAheadLog) Replay(offset int64, f func([]byte) error) error {
 	logFiles, err := filepath.Glob(wal.logFileName + "*")
 	if err != nil {
 		return err
 	}
-
-	for _, logFile := range logFiles {
+	index, startingOffset, err := wal.findStartingLogFile(offset, logFiles)
+	if err != nil {
+		return err
+	}
+	for i, logFile := range logFiles[index:] {
 		file, err := os.Open(logFile)
 		if err != nil {
 			return err
 		}
 		defer file.Close()
 
-		if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		if i > 0 {
+			if _, err := file.Seek(0, io.SeekStart); err != nil {
+				return err
+			}
+		} else if err = wal.seekOffset(offset, startingOffset, file); err != nil {
 			return err
 		}
 
-		var sizeBuf [4]byte
+		var sizeBuf = make([]byte, 4)
 
 		for {
-			_, err := io.ReadFull(file, sizeBuf[:])
+			_, err := io.ReadFull(file, sizeBuf)
 			if err == io.EOF {
 				break
 			} else if err != nil {
 				return err
 			}
 
-			size := binary.LittleEndian.Uint32(sizeBuf[:])
+			size := binary.LittleEndian.Uint32(sizeBuf)
 			data := make([]byte, size)
 			_, err = io.ReadFull(file, data)
 			if err != nil {
