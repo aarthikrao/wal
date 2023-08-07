@@ -225,5 +225,5 @@ func (wal *WriteAheadLog) Replay(offset int64, f func([]byte) error) error {
 }
 
 func (wal *WriteAheadLog) isSyncTimeout() bool {
-	return time.Now().Sub(wal.lastSyncTime) > wal.syncTimeout
+	return time.Since(wal.lastSyncTime) > wal.syncTimeout
 }
