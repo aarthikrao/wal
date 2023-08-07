@@ -1,9 +1,10 @@
-package wal
+package main40
 
 import (
 	"fmt"
 	"time"
 
+	"github.com/aarthikrao/wal"
 	"go.uber.org/zap"
 )
 
@@ -13,12 +14,12 @@ func main() {
 		panic(err)
 	}
 
-	wal, err := NewWriteAheadLog(&WALOptions{
-		LogDir:      "data/",
-		MaxLogSize:  40 * 1024 * 1024, // 400 MB (log rotation size)
-		MaxSegments: 2,
-		Log:         log,
-	})
+	wal, err := wal.NewWriteAheadLog(
+		wal.WithLogDir("data/"),
+		wal.WithMaxSegmentSize(4*1024*1024),
+		wal.WithSegmentsLimit(2),
+		wal.WithLogger(log),
+	)
 	if err != nil {
 		fmt.Println("Error creating Write-Ahead Log:", err)
 		return

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -18,40 +19,33 @@ type file interface {
 	Sync() error
 }
 
-type WALOptions struct {
-	// LogDir is where the wal logs will be stored
-	LogDir string
-
-	// Maximum size in bytes for each file
-	MaxLogSize int64
-
-	// The entire wal is broken down into smaller segments.
-	// This will be helpful during log rotation and management
-	// maximum number of log segments
-	MaxSegments int
-
-	Log *zap.Logger
-}
-
 type WriteAheadLog struct {
-	logFileName  string
-	file         file
-	mu           sync.Mutex
-	maxLogSize   int64
-	logSize      int64
-	segmentCount int
+	logDirName     string
+	maxSegments    int
+	maxSegmentSize int64
+	syncTimeout    time.Duration
+	log            *zap.Logger
 
-	maxSegments      int
-	currentSegmentID int
+	logFileName        string
+	file               file
+	bufWriter          *bufio.Writer
+	mu                 sync.Mutex
+	currentSegmentSize int64
+	segmentCount       int
+	currentSegmentID   int
 
-	log *zap.Logger
-
-	bufWriter *bufio.Writer
-	sizeBuf   [4]byte
+	lastSyncTime time.Time
+	sizeBuf      [4]byte
 }
 
-func NewWriteAheadLog(opts *WALOptions) (*WriteAheadLog, error) {
-	walLogFilePrefix := opts.LogDir + "wal"
+func NewWriteAheadLog(opts ...Option) (*WriteAheadLog, error) {
+
+	var wal WriteAheadLog
+	for _, opt := range opts {
+		opt(&wal)
+	}
+
+	walLogFilePrefix := wal.logDirName + "wal"
 
 	firstLogFileName := walLogFilePrefix + ".0"
 	file, err := os.OpenFile(firstLogFileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
@@ -65,19 +59,12 @@ func NewWriteAheadLog(opts *WALOptions) (*WriteAheadLog, error) {
 	}
 
 	return &WriteAheadLog{
-		logFileName: walLogFilePrefix,
-		file:        file,
-
-		maxLogSize: opts.MaxLogSize,
-		logSize:    fi.Size(),
-
-		segmentCount: 0,
-
-		maxSegments:      opts.MaxSegments,
-		currentSegmentID: 0,
-
-		log:              opts.Log,
-		bufWriter:        bufio.NewWriter(file),
+		logFileName:        walLogFilePrefix,
+		file:               file,
+		currentSegmentSize: fi.Size(),
+		segmentCount:       0,
+		currentSegmentID:   0,
+		bufWriter:          bufio.NewWriter(file),
 	}, nil
 }
 
@@ -86,7 +73,7 @@ func (wal *WriteAheadLog) Write(data []byte) (int64, error) {
 	defer wal.mu.Unlock()
 
 	entrySize := 4 + len(data) // 4 bytes for the size prefix
-	if wal.logSize+int64(entrySize) > wal.maxLogSize {
+	if wal.currentSegmentSize+int64(entrySize) > wal.maxSegmentSize {
 		// Flushing all the in-memory changes to disk
 		if err := wal.Sync(); err != nil {
 			return 0, err
@@ -113,7 +100,12 @@ func (wal *WriteAheadLog) Write(data []byte) (int64, error) {
 		return 0, err
 	}
 
-	wal.logSize += int64(entrySize)
+	wal.currentSegmentSize += int64(entrySize)
+
+	// check if need to sync data
+	if wal.isSyncTimeout() {
+		return offset, wal.Sync()
+	}
 	return offset, nil
 }
 
@@ -133,12 +125,19 @@ func (wal *WriteAheadLog) GetOffset() (int64, error) {
 	return wal.file.Seek(0, io.SeekEnd)
 }
 
+// Sync flushes all the data to the disk
+// This call expects that caller is taking care of synchronization
 func (wal *WriteAheadLog) Sync() error {
 	err := wal.bufWriter.Flush()
 	if err != nil {
 		return err
 	}
-	return wal.file.Sync()
+	err = wal.file.Sync()
+	if err != nil {
+		return err
+	}
+	wal.lastSyncTime = time.Now()
+	return nil
 }
 
 func (wal *WriteAheadLog) rotateLog() error {
@@ -164,7 +163,7 @@ func (wal *WriteAheadLog) rotateLog() error {
 
 	wal.file = file
 	wal.bufWriter.Reset(file)
-	wal.logSize = 0
+	wal.currentSegmentSize = 0
 	return nil
 }
 
@@ -223,4 +222,8 @@ func (wal *WriteAheadLog) Replay(offset int64, f func([]byte) error) error {
 	}
 
 	return nil
+}
+
+func (wal *WriteAheadLog) isSyncTimeout() bool {
+	return time.Since(wal.lastSyncTime) > wal.syncTimeout
 }
