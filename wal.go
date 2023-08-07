@@ -169,7 +169,7 @@ func (wal *WriteAheadLog) findStartingLogFile(offset int64, files []string) (i i
 	for index, file := range files {
 		parts := strings.Split(file, ".")
 		startingOffsetStr := parts[len(parts)-1]
-		startingOffset, err = strconv.ParseInt(startingOffsetStr, 10, 64)
+		startingOffset, err := strconv.ParseInt(startingOffsetStr, 10, 64)
 		if err != nil {
 			return -1, -1, err
 		}
