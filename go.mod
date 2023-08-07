@@ -1,4 +1,4 @@
-module github.com/gotest
+module github.com/aarthikrao/wal
 
 go 1.20
 
