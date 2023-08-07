@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +37,8 @@ type WALOptions struct {
 	Log *zap.Logger
 }
 
+const lengthBufferSize = 4
+
 type WriteAheadLog struct {
 	logFileName  string
 	file         file
@@ -51,7 +54,7 @@ type WriteAheadLog struct {
 
 	curOffset int64
 	bufWriter *bufio.Writer
-	sizeBuf   [4]byte
+	sizeBuf   [lengthBufferSize]byte
 }
 
 func NewWriteAheadLog(opts *WALOptions) (*WriteAheadLog, error) {
@@ -205,20 +208,17 @@ func (wal *WriteAheadLog) findStartingLogFile(offset int64, files []string) (i i
 	return -1, -1, errors.New("offset doesn't exsists")
 }
 
-func (wal *WriteAheadLog) seekOffset(offset int64, startingOffset int64, file io.ReadSeeker) (err error) {
-	var sizeByte = make([]byte, 4)
-	if _, err = file.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-
+func (wal *WriteAheadLog) seekOffset(offset int64, startingOffset int64, file bufio.Reader) (err error) {
+	var readBytes []byte
 	for startingOffset < offset {
-		if _, err = io.ReadFull(file, sizeByte); err != nil {
-			return err
+		readBytes, err = file.Peek(lengthBufferSize)
+		if err != nil {
+			break
 		}
-		dataSize := binary.LittleEndian.Uint32(sizeByte)
-		totalEntrySize := int64(4 + dataSize)
-		if _, err = file.Seek(totalEntrySize, io.SeekCurrent); err != nil {
-			return err
+		dataSize := binary.LittleEndian.Uint32(readBytes)
+		_, err = file.Discard(lengthBufferSize + int(dataSize))
+		if err != nil {
+			break
 		}
 		startingOffset++
 	}
@@ -230,47 +230,60 @@ func (wal *WriteAheadLog) Replay(offset int64, f func([]byte) error) error {
 	if err != nil {
 		return err
 	}
+	sort.Strings(logFiles)
 	index, startingOffset, err := wal.findStartingLogFile(offset, logFiles)
 	if err != nil {
 		return err
 	}
+	var bufReader bufio.Reader
 	for i, logFile := range logFiles[index:] {
 		file, err := os.Open(logFile)
 		if err != nil {
 			return err
 		}
-		defer file.Close()
-
-		if i > 0 {
-			if _, err := file.Seek(0, io.SeekStart); err != nil {
+		bufReader.Reset(file)
+		if i == 0 {
+			if err = wal.seekOffset(offset, startingOffset, bufReader); err != nil {
 				return err
 			}
-		} else if err = wal.seekOffset(offset, startingOffset, file); err != nil {
+		}
+		err = wal.iterateFile(bufReader, f)
+		if err != nil {
+			file.Close()
 			return err
 		}
-
-		var sizeBuf = make([]byte, 4)
-
-		for {
-			_, err := io.ReadFull(file, sizeBuf)
-			if err == io.EOF {
-				break
-			} else if err != nil {
-				return err
-			}
-
-			size := binary.LittleEndian.Uint32(sizeBuf)
-			data := make([]byte, size)
-			_, err = io.ReadFull(file, data)
-			if err != nil {
-				return err
-			}
-
-			if err := f(data); err != nil {
-				return err
-			}
-		}
+		file.Close()
 	}
 
 	return nil
+}
+
+func (wal *WriteAheadLog) iterateFile(bufReader bufio.Reader, callback func([]byte) error) error {
+	var readBytes []byte
+	var err error
+	for err == nil {
+
+		readBytes, err = bufReader.Peek(lengthBufferSize)
+		if err != nil {
+			break
+		}
+		usize := binary.LittleEndian.Uint32(readBytes)
+		size := int(usize)
+		_, err = bufReader.Discard(lengthBufferSize)
+		if err != nil {
+			break
+		}
+		readBytes, err = bufReader.Peek(size)
+		if err != nil {
+			break
+		}
+		if err = callback(readBytes); err != nil {
+			break
+		}
+		_, err = bufReader.Discard(size)
+	}
+	if err == io.EOF {
+		return nil
+	}
+	return err
 }
