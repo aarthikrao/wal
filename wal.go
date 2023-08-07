@@ -7,40 +7,86 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 )
 
-type WALOptions struct {
-	// LogDir is where the wal logs will be stored
-	LogDir string
+// option represents any wal config option
+type Option interface {
+	apply(*WriteAheadLog)
+}
 
-	// Maximum size in bytes for each file
-	MaxLogSize int64
+type walLogDir string
+type maxSegmentSize int64
+type maxNumberOfSegment int
+type logger zap.Logger
+type syncTimeout time.Duration
 
-	// The entire wal is broken down into smaller segments.
-	// This will be helpful during log rotation and management
-	// maximum number of log segments
-	MaxSegments int
+func (op walLogDir) apply(wal *WriteAheadLog) {
+	wal.logDirName = string(op)
+}
 
-	log *zap.Logger
+func (op maxSegmentSize) apply(wal *WriteAheadLog) {
+	wal.maxLogSize = int64(op)
+}
+
+func (op maxNumberOfSegment) apply(wal *WriteAheadLog) {
+	wal.maxSegments = int(op)
+}
+
+func (op logger) apply(wal *WriteAheadLog) {
+	*wal.log = zap.Logger(op)
+}
+
+func (op syncTimeout) apply(wal *WriteAheadLog) {
+	wal.flushTimeout = time.Duration(op)
+}
+
+func WithLogDir(dir string) Option {
+	return walLogDir(dir)
+}
+
+func WithMaxSegmentSize(maxSize int64) Option {
+	return maxSegmentSize(maxSize)
+}
+
+func WithSegmentsLimit(segmentLimit int) Option {
+	return maxNumberOfSegment(segmentLimit)
+}
+
+func WithLogger(zlogger *zap.Logger) Option {
+	return logger(*zlogger)
+}
+
+func WithSyncTimeout(timeout time.Duration) Option {
+	return syncTimeout(timeout)
 }
 
 type WriteAheadLog struct {
-	logFileName  string
-	file         *os.File
-	mu           sync.Mutex
+	logDirName   string
+	maxSegments  int
 	maxLogSize   int64
-	logSize      int64
-	segmentCount int
+	flushTimeout time.Duration
+	log          *zap.Logger
 
-	maxSegments      int
-	currentSegmentID int
+	logFileName        string
+	file               *os.File
+	mu                 sync.Mutex
+	currentSegmentSize int64
+	segmentCount       int
+	currentSegmentID   int
 
-	log *zap.Logger
+	lastSyncTime time.Time
 }
 
-func NewWriteAheadLog(opts *WALOptions) (*WriteAheadLog, error) {
+func NewWriteAheadLog(opts ...Option) (*WriteAheadLog, error) {
+
+	var wal WriteAheadLog
+	for _, v := range opts {
+		v.apply(&wal)
+	}
+
 	walLogFilePrefix := opts.LogDir + "wal"
 
 	firstLogFileName := walLogFilePrefix + ".0"
@@ -55,17 +101,11 @@ func NewWriteAheadLog(opts *WALOptions) (*WriteAheadLog, error) {
 	}
 
 	return &WriteAheadLog{
-		logFileName: walLogFilePrefix,
-		file:        file,
-
-		maxLogSize: opts.MaxLogSize,
-		logSize:    fi.Size(),
-
-		segmentCount: 0,
-
-		maxSegments:      opts.MaxSegments,
-		currentSegmentID: 0,
-		log:              opts.log,
+		logFileName:        walLogFilePrefix,
+		file:               file,
+		currentSegmentSize: fi.Size(),
+		segmentCount:       0,
+		currentSegmentID:   0,
 	}, nil
 }
 
@@ -74,7 +114,7 @@ func (wal *WriteAheadLog) Write(data []byte) (int64, error) {
 	defer wal.mu.Unlock()
 
 	entrySize := 4 + len(data) // 4 bytes for the size prefix
-	if wal.logSize+int64(entrySize) > wal.maxLogSize {
+	if wal.currentSegmentSize+int64(entrySize) > wal.maxLogSize {
 		if err := wal.rotateLog(); err != nil {
 			return 0, err
 		}
@@ -99,7 +139,7 @@ func (wal *WriteAheadLog) Write(data []byte) (int64, error) {
 		return 0, err
 	}
 
-	wal.logSize += int64(entrySize)
+	wal.currentSegmentSize += int64(entrySize)
 	return offset, nil
 }
 
@@ -139,7 +179,7 @@ func (wal *WriteAheadLog) rotateLog() error {
 	}
 
 	wal.file = file
-	wal.logSize = 0
+	wal.currentSegmentSize = 0
 	return nil
 }
 
@@ -198,4 +238,8 @@ func (wal *WriteAheadLog) Replay(offset int64, f func([]byte) error) error {
 	}
 
 	return nil
+}
+
+func (wal *WriteAheadLog) shouldSync() error {
+
 }
