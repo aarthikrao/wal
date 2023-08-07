@@ -30,7 +30,7 @@ type WALOptions struct {
 	// maximum number of log segments
 	MaxSegments int
 
-	log *zap.Logger
+	Log *zap.Logger
 }
 
 type WriteAheadLog struct {
@@ -75,6 +75,7 @@ func NewWriteAheadLog(opts *WALOptions) (*WriteAheadLog, error) {
 
 		maxSegments:      opts.MaxSegments,
 		currentSegmentID: 0,
+
 		log:              opts.log,
 		bufWriter:        bufio.NewWriter(file),
 	}, nil
