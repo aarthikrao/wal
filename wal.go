@@ -76,7 +76,7 @@ func NewWriteAheadLog(opts *WALOptions) (*WriteAheadLog, error) {
 		maxSegments:      opts.MaxSegments,
 		currentSegmentID: 0,
 
-		log:              opts.log,
+		log:              opts.Log,
 		bufWriter:        bufio.NewWriter(file),
 	}, nil
 }
