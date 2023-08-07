@@ -17,7 +17,7 @@ func main() {
 		LogDir:      "data/",
 		MaxLogSize:  40 * 1024 * 1024, // 400 MB (log rotation size)
 		MaxSegments: 2,
-		log:         log,
+		Log:         log,
 	})
 	if err != nil {
 		fmt.Println("Error creating Write-Ahead Log:", err)
