@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -34,6 +35,9 @@ type WALOptions struct {
 	// maximum number of log segments
 	MaxSegments int
 
+	MaxWaitBeforeSync time.Duration
+	SyncMaxBytes      int64
+
 	Log *zap.Logger
 }
 
@@ -55,6 +59,12 @@ type WriteAheadLog struct {
 	curOffset int64
 	bufWriter *bufio.Writer
 	sizeBuf   [lengthBufferSize]byte
+
+	// syncTimer is used to wait for either the specified time interval
+	// or until a syncMaxBytes amount of data has been accumulated before Syncing to the disk
+	syncTimer         *time.Ticker
+	maxWaitBeforeSync time.Duration // TODO: Yet to implement
+	syncMaxBytes      int64
 }
 
 func NewWriteAheadLog(opts *WALOptions) (*WriteAheadLog, error) {
@@ -71,7 +81,7 @@ func NewWriteAheadLog(opts *WALOptions) (*WriteAheadLog, error) {
 		return nil, err
 	}
 
-	return &WriteAheadLog{
+	wal := &WriteAheadLog{
 		logFileName: walLogFilePrefix,
 		file:        file,
 
@@ -86,7 +96,31 @@ func NewWriteAheadLog(opts *WALOptions) (*WriteAheadLog, error) {
 		log:              opts.Log,
 
 		bufWriter: bufio.NewWriter(file),
-	}, nil
+
+		syncTimer:    time.NewTicker(opts.MaxWaitBeforeSync),
+		syncMaxBytes: opts.SyncMaxBytes,
+	}
+	go wal.keepSyncing()
+
+	return wal, nil
+}
+
+func (wal *WriteAheadLog) keepSyncing() {
+	for {
+		<-wal.syncTimer.C
+
+		wal.mu.Lock()
+		err := wal.Sync()
+		wal.mu.Unlock()
+
+		if err != nil {
+			wal.log.Error("Error while performing sync", zap.Error(err))
+		}
+	}
+}
+
+func (wal *WriteAheadLog) resetTimer() {
+	wal.syncTimer.Reset(wal.maxWaitBeforeSync)
 }
 
 func (wal *WriteAheadLog) Write(data []byte) error {
@@ -178,15 +212,23 @@ func (wal *WriteAheadLog) rotateLog() error {
 }
 
 func (wal *WriteAheadLog) deleteOldestSegment() error {
-	oldestSegment := fmt.Sprintf("%s.%d", wal.logFileName, wal.currentSegmentID-wal.maxSegments)
+	oldestSegment := fmt.Sprintf("%s.%d.*", wal.logFileName, wal.currentSegmentID-wal.maxSegments)
 
-	wal.log.Info("Removing wal file", zap.String("segment", oldestSegment))
-	if err := os.Remove(oldestSegment); err != nil {
+	files, err := filepath.Glob(oldestSegment)
+	if err != nil {
 		return err
 	}
 
-	// Update the segment count
-	wal.segmentCount--
+	// We will have only one file to delete but still ...
+	for _, f := range files {
+		wal.log.Info("Removing wal file", zap.String("segment", f))
+		if err := os.Remove(f); err != nil {
+			return err
+		}
+
+		// Update the segment count
+		wal.segmentCount--
+	}
 
 	return nil
 }

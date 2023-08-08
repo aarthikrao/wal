@@ -14,10 +14,12 @@ func main() {
 	}
 
 	wal, err := NewWriteAheadLog(&WALOptions{
-		LogDir:      "data/",
-		MaxLogSize:  40 * 1024 * 1024, // 400 MB (log rotation size)
-		MaxSegments: 2,
-		Log:         log,
+		LogDir:            "data/",
+		MaxLogSize:        40 * 1024 * 1024, // 400 MB (log rotation size)
+		MaxSegments:       2,
+		Log:               log,
+		MaxWaitBeforeSync: 1 * time.Second,
+		SyncMaxBytes:      1000,
 	})
 	if err != nil {
 		fmt.Println("Error creating Write-Ahead Log:", err)
