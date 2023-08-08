@@ -123,7 +123,7 @@ func (wal *WriteAheadLog) resetTimer() {
 	wal.syncTimer.Reset(wal.maxWaitBeforeSync)
 }
 
-func (wal *WriteAheadLog) Write(data []byte) error {
+func (wal *WriteAheadLog) Write(data []byte) (int64, error) {
 	wal.mu.Lock()
 	defer wal.mu.Unlock()
 
@@ -131,33 +131,33 @@ func (wal *WriteAheadLog) Write(data []byte) error {
 	if wal.logSize+int64(entrySize) > wal.maxLogSize {
 		// Flushing all the in-memory changes to disk
 		if err := wal.Sync(); err != nil {
-			return err
+			return 0, err
 		}
 
 		if err := wal.rotateLog(); err != nil {
-			return err
+			return 0, err
 		}
 	}
 
 	_, err := wal.file.Seek(0, io.SeekEnd)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	// Write the size prefix to the buffer
 	binary.LittleEndian.PutUint32(wal.sizeBuf[:], uint32(len(data)))
 
 	if _, err := wal.bufWriter.Write(wal.sizeBuf[:]); err != nil {
-		return err
+		return 0, err
 	}
 	// Write data payload to the buffer
 	if _, err := wal.bufWriter.Write(data); err != nil {
-		return err
+		return 0, err
 	}
 
 	wal.logSize += int64(entrySize)
 	wal.curOffset++
-	return nil
+	return wal.curOffset, nil
 }
 
 // Close closes the underneath storage file, it doesn't flushes data remaining in the memory buffer

@@ -28,7 +28,7 @@ func main() {
 	defer wal.Close()
 
 	for i := 0; i < 10000000; i++ {
-		err := wal.Write([]byte("Simulate some database changes and write them to the WAL"))
+		_, err := wal.Write([]byte("Simulate some database changes and write them to the WAL"))
 		if err != nil {
 			panic(err)
 		}
