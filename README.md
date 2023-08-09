@@ -89,8 +89,7 @@ func main() {
 ## TODO
 * Start from where we left off during restart
 * Test cases
-* Maintain a monotonically increasing offset
-* Read from a particular offset
+* More comments for common people
 
 ## License
 
