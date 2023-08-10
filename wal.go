@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -70,39 +71,129 @@ type WriteAheadLog struct {
 func NewWriteAheadLog(opts *WALOptions) (*WriteAheadLog, error) {
 	walLogFilePrefix := opts.LogDir + "wal"
 
-	firstLogFileName := walLogFilePrefix + ".0.0" // prefix + . {segmentID} + . {starting_offset}
-	file, err := os.OpenFile(firstLogFileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-	if err != nil {
-		return nil, err
-	}
-
-	fi, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-
 	wal := &WriteAheadLog{
-		logFileName: walLogFilePrefix,
-		file:        file,
-
-		maxLogSize: opts.MaxLogSize,
-		logSize:    fi.Size(),
-
-		segmentCount: 0,
-
-		maxSegments:      opts.MaxSegments,
-		currentSegmentID: 0,
-		curOffset:        -1,
-		log:              opts.Log,
-
-		bufWriter: bufio.NewWriter(file),
-
-		syncTimer:    time.NewTicker(opts.MaxWaitBeforeSync),
+		logFileName:  walLogFilePrefix,
+		maxLogSize:   opts.MaxLogSize,
+		maxSegments:  opts.MaxSegments,
+		log:          opts.Log,
 		syncMaxBytes: opts.SyncMaxBytes,
+		syncTimer:    time.NewTicker(opts.MaxWaitBeforeSync),
 	}
+	err := wal.openExistingOrCreateNew(opts.LogDir)
+	if err != nil {
+		return nil, err
+	}
+
 	go wal.keepSyncing()
 
 	return wal, nil
+}
+
+func isDirectoryEmpty(dirPath string) (bool, error) {
+	// Open the directory
+	dir, err := os.Open(dirPath)
+	if err != nil {
+		return false, err
+	}
+	defer dir.Close()
+
+	// Read the directory contents
+	fileList, err := dir.Readdir(1) // Read the first entry
+	if err != nil {
+		return false, err
+	}
+
+	// If the list of files is empty, the directory is empty
+	return len(fileList) == 0, nil
+}
+
+func (wal *WriteAheadLog) openExistingOrCreateNew(dirPath string) error {
+	empty, err := isDirectoryEmpty(dirPath)
+	if err != nil {
+		return err
+	}
+
+	if empty {
+		// Create the first log file
+		firstLogFileName := wal.logFileName + ".0.0" // prefix + . {segmentID} + . {starting_offset}
+		file, err := os.OpenFile(firstLogFileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+		if err != nil {
+			return err
+		}
+
+		fi, err := file.Stat()
+		if err != nil {
+			return err
+		}
+
+		// Set default values since this is the first log we are opening
+		wal.file = file
+		wal.bufWriter = bufio.NewWriter(file)
+		wal.logSize = fi.Size()
+		wal.segmentCount = 0
+		wal.currentSegmentID = 0
+		wal.curOffset = -1
+
+	} else {
+		// Fetch all the file names in the path and sort them
+		logFiles, err := filepath.Glob(wal.logFileName + "*")
+		if err != nil {
+			return err
+		}
+		sort.Strings(logFiles)
+
+		// open the last file
+		fileName := logFiles[len(logFiles)-1]
+		file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+		if err != nil {
+			return err
+		}
+
+		fi, err := file.Stat()
+		if err != nil {
+			return err
+		}
+
+		// Find the current segment count and the latest offset from file name
+		s := strings.Split(fileName, ".")
+		lastSegment, err := strconv.Atoi(s[1])
+		if err != nil {
+			return err
+		}
+
+		latestOffset, err := strconv.Atoi(s[2])
+		if err != nil {
+			return err
+		}
+		offset := int64(latestOffset)
+
+		// Go to the end of file and calculate the offset
+		file.Seek(0, io.SeekStart)
+		bufReader := bufio.NewReader(file)
+		n, err := wal.seekOffset(math.MaxInt, offset, *bufReader)
+		if err != nil && err != io.EOF {
+			return err
+		}
+		offset += n
+
+		wal.file = file
+		file.Seek(0, io.SeekEnd)
+		wal.bufWriter = bufio.NewWriter(file)
+		wal.logSize = fi.Size()
+		wal.currentSegmentID = lastSegment
+		wal.curOffset = offset
+		wal.segmentCount = len(logFiles) - 1
+
+		wal.log.Info("appending wal",
+			zap.String("file", fileName),
+			zap.Int64("latestOffset", wal.curOffset),
+			zap.Int("latestSegment", lastSegment),
+			zap.Int("segmentCount", wal.segmentCount),
+		)
+
+	}
+
+	return nil
 }
 
 func (wal *WriteAheadLog) keepSyncing() {
@@ -169,6 +260,7 @@ func (wal *WriteAheadLog) Close() error {
 	return wal.file.Close()
 }
 
+// GetOffset returns the current log offset.
 func (wal *WriteAheadLog) GetOffset() int64 {
 	wal.mu.Lock()
 	defer wal.mu.Unlock()
@@ -176,6 +268,8 @@ func (wal *WriteAheadLog) GetOffset() int64 {
 	return wal.curOffset
 }
 
+// Sync writes all the data to the disk.
+// Since Sync is a expensive call, calling this often will slow down the throughput.
 func (wal *WriteAheadLog) Sync() error {
 	err := wal.bufWriter.Flush()
 	if err != nil {
@@ -184,6 +278,8 @@ func (wal *WriteAheadLog) Sync() error {
 	return wal.file.Sync()
 }
 
+// rotateLog closes the current file, opens a new one.
+// It also cleans up the oldest log files if the number of log files are greater than maxSegments
 func (wal *WriteAheadLog) rotateLog() error {
 	if err := wal.file.Close(); err != nil {
 		return err
@@ -211,6 +307,7 @@ func (wal *WriteAheadLog) rotateLog() error {
 	return nil
 }
 
+// deleteOldestSegment removes the oldest log file from the logs
 func (wal *WriteAheadLog) deleteOldestSegment() error {
 	oldestSegment := fmt.Sprintf("%s.%d.*", wal.logFileName, wal.currentSegmentID-wal.maxSegments)
 
@@ -250,7 +347,7 @@ func (wal *WriteAheadLog) findStartingLogFile(offset int64, files []string) (i i
 	return -1, -1, errors.New("offset doesn't exsists")
 }
 
-func (wal *WriteAheadLog) seekOffset(offset int64, startingOffset int64, file bufio.Reader) (err error) {
+func (wal *WriteAheadLog) seekOffset(offset int64, startingOffset int64, file bufio.Reader) (n int64, err error) {
 	var readBytes []byte
 	for startingOffset < offset {
 		readBytes, err = file.Peek(lengthBufferSize)
@@ -262,9 +359,10 @@ func (wal *WriteAheadLog) seekOffset(offset int64, startingOffset int64, file bu
 		if err != nil {
 			break
 		}
-		startingOffset++
+		startingOffset++ // Check logic
+		n++
 	}
-	return err
+	return n, err
 }
 
 func (wal *WriteAheadLog) Replay(offset int64, f func([]byte) error) error {
@@ -285,7 +383,7 @@ func (wal *WriteAheadLog) Replay(offset int64, f func([]byte) error) error {
 		}
 		bufReader.Reset(file)
 		if i == 0 {
-			if err = wal.seekOffset(offset, startingOffset, bufReader); err != nil {
+			if _, err = wal.seekOffset(offset, startingOffset, bufReader); err != nil {
 				return err
 			}
 		}
