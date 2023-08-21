@@ -34,55 +34,47 @@ import (
 )
 
 func main() {
-	// Initialize the WAL options
-	opts := &wal.WALOptions{
-		LogDir:      "data/",   // Log files will be stored in the "data" directory
-		MaxLogSize:  1024 * 1024, // 1 MB maximum log size per file
-		MaxSegments: 10,          // Maximum number of log segments
-		log:         zap.NewExample(), // Replace with your logger instance
+	log, err := zap.NewProduction()
+	if err != nil {
+		panic(err)
 	}
 
-	// Create a new Write-Ahead Log
-	wal, err := wal.NewWriteAheadLog(opts)
+	wal, err := NewWriteAheadLog(&WALOptions{
+		LogDir:            "data/",
+		MaxLogSize:        40 * 1024 * 1024, // 400 MB (log rotation size)
+		MaxSegments:       2,
+		Log:               log,
+		MaxWaitBeforeSync: 1 * time.Second,
+		SyncMaxBytes:      1000,
+	})
 	if err != nil {
 		fmt.Println("Error creating Write-Ahead Log:", err)
 		return
 	}
 	defer wal.Close()
 
-	// Simulate some database changes and write them to the WAL
-	data1 := []byte("Change 1")
-	offset1, err := wal.Write(data1)
-	if err != nil {
-		fmt.Println("Error writing to WAL:", err)
-		return
+	for i := 0; i < 10000000; i++ {
+		_, err := wal.Write([]byte("Simulate some database changes and write them to the WAL"))
+		if err != nil {
+			panic(err)
+		}
 	}
 
-	data2 := []byte("Change 2")
-	offset2, err := wal.Write(data2)
+	// Sync all the logs to the file at the end so that we dont loose any data
+	err = wal.Sync()
 	if err != nil {
-		fmt.Println("Error writing to WAL:", err)
-		return
+		fmt.Println("Error in final sync", err)
 	}
 
-	// You can add more database changes here...
-
-	// Database changes recorded in the Write-Ahead Log.
-	fmt.Println("Current log offset:", offset2)
-
-	// Simulate crash recovery by replaying the log from a specific offset
-	replayFromOffset := offset1 // Change this offset to replay from a different point
-
-	err = wal.Replay(replayFromOffset, func(data []byte) error {
-		// Apply the changes to the database
-		// For this example, we're just printing the data.
-		fmt.Println("Replaying log entry:", string(data))
+	startTime := time.Now()
+	var numLines int
+	wal.Replay(0, func(b []byte) error {
+		numLines++
 		return nil
 	})
 
-	if err != nil {
-		fmt.Println("Error replaying log:", err)
-	}
+	fmt.Println("Total lines replayed:", numLines)
+	fmt.Println("time taken:", time.Since(startTime))
 }
 ```
 

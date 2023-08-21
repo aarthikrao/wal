@@ -15,7 +15,7 @@ func main() {
 
 	wal, err := NewWriteAheadLog(&WALOptions{
 		LogDir:            "data/",
-		MaxLogSize:        40 * 1024 * 1024, // 400 MB (log rotation size)
+		MaxLogSize:        40 * 1024 * 1024, // 40 MB (log rotation size)
 		MaxSegments:       2,
 		Log:               log,
 		MaxWaitBeforeSync: 1 * time.Second,
@@ -34,6 +34,12 @@ func main() {
 		}
 	}
 
+	// Sync all the logs to the file at the end so that we dont loose any data
+	err = wal.Sync()
+	if err != nil {
+		fmt.Println("Error in final sync", err)
+	}
+
 	startTime := time.Now()
 	var numLines int
 	wal.Replay(0, func(b []byte) error {
@@ -41,6 +47,6 @@ func main() {
 		return nil
 	})
 
-	fmt.Println("Total lines", numLines)
-	fmt.Println("time taken", time.Since(startTime))
+	fmt.Println("Total lines replayed:", numLines)
+	fmt.Println("time taken:", time.Since(startTime))
 }

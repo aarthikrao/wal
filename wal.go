@@ -72,12 +72,13 @@ func NewWriteAheadLog(opts *WALOptions) (*WriteAheadLog, error) {
 	walLogFilePrefix := opts.LogDir + "wal"
 
 	wal := &WriteAheadLog{
-		logFileName:  walLogFilePrefix,
-		maxLogSize:   opts.MaxLogSize,
-		maxSegments:  opts.MaxSegments,
-		log:          opts.Log,
-		syncMaxBytes: opts.SyncMaxBytes,
-		syncTimer:    time.NewTicker(opts.MaxWaitBeforeSync),
+		logFileName:       walLogFilePrefix,
+		maxLogSize:        opts.MaxLogSize,
+		maxSegments:       opts.MaxSegments,
+		log:               opts.Log,
+		syncMaxBytes:      opts.SyncMaxBytes,
+		syncTimer:         time.NewTicker(opts.MaxWaitBeforeSync),
+		maxWaitBeforeSync: opts.MaxWaitBeforeSync,
 	}
 	err := wal.openExistingOrCreateNew(opts.LogDir)
 	if err != nil {
@@ -98,8 +99,8 @@ func isDirectoryEmpty(dirPath string) (bool, error) {
 	defer dir.Close()
 
 	// Read the directory contents
-	fileList, err := dir.Readdir(1) // Read the first entry
-	if err != nil {
+	fileList, err := dir.ReadDir(1) // Read the first entry
+	if err != nil && err != io.EOF {
 		return false, err
 	}
 
@@ -219,8 +220,9 @@ func (wal *WriteAheadLog) Write(data []byte) (int64, error) {
 	defer wal.mu.Unlock()
 
 	entrySize := 4 + len(data) // 4 bytes for the size prefix
+
 	if wal.logSize+int64(entrySize) > wal.maxLogSize {
-		// Flushing all the in-memory changes to disk
+		// Flushing all the in-memory changes to disk, and rotating the log
 		if err := wal.Sync(); err != nil {
 			return 0, err
 		}
@@ -228,6 +230,8 @@ func (wal *WriteAheadLog) Write(data []byte) (int64, error) {
 		if err := wal.rotateLog(); err != nil {
 			return 0, err
 		}
+
+		wal.resetTimer()
 	}
 
 	_, err := wal.file.Seek(0, io.SeekEnd)
