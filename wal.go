@@ -122,15 +122,10 @@ func (wal *WriteAheadLog) openExistingOrCreateNew(dirPath string) error {
 			return err
 		}
 
-		fi, err := file.Stat()
-		if err != nil {
-			return err
-		}
-
 		// Set default values since this is the first log we are opening
 		wal.file = file
 		wal.bufWriter = bufio.NewWriter(file)
-		wal.logSize = fi.Size()
+		wal.logSize = 0 // since fi.Size() is 0 for newly created file
 		wal.segmentCount = 0
 		wal.currentSegmentID = 0
 		wal.curOffset = -1
