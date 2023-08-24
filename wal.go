@@ -44,6 +44,9 @@ type WALOptions struct {
 
 const lengthBufferSize = 4
 
+// A Write Ahead Log (WAL) is a data structure used to record changes to a database or
+// any persistent storage system in a sequential and durable manner. This allows for
+// crash recovery and data integrity.
 type WriteAheadLog struct {
 	logFileName  string
 	file         file
@@ -68,6 +71,7 @@ type WriteAheadLog struct {
 	syncMaxBytes      int64
 }
 
+// NewWriteAheadLog creates a new instance of the WriteAheadLog with the provided options.
 func NewWriteAheadLog(opts *WALOptions) (*WriteAheadLog, error) {
 	walLogFilePrefix := opts.LogDir + "wal"
 
@@ -90,6 +94,7 @@ func NewWriteAheadLog(opts *WALOptions) (*WriteAheadLog, error) {
 	return wal, nil
 }
 
+// isDirectoryEmpty returns true if the directory, false otherwise.
 func isDirectoryEmpty(dirPath string) (bool, error) {
 	// Open the directory
 	dir, err := os.Open(dirPath)
@@ -192,6 +197,7 @@ func (wal *WriteAheadLog) openExistingOrCreateNew(dirPath string) error {
 	return nil
 }
 
+// keepSyncing periodically triggers a synchronous write to the disk to ensure data durability.
 func (wal *WriteAheadLog) keepSyncing() {
 	for {
 		<-wal.syncTimer.C
@@ -206,10 +212,12 @@ func (wal *WriteAheadLog) keepSyncing() {
 	}
 }
 
+// resetTimer resets the synchronization timer.
 func (wal *WriteAheadLog) resetTimer() {
 	wal.syncTimer.Reset(wal.maxWaitBeforeSync)
 }
 
+// Write appends the provided data to the log, ensuring log rotation and syncing if necessary.
 func (wal *WriteAheadLog) Write(data []byte) (int64, error) {
 	wal.mu.Lock()
 	defer wal.mu.Unlock()
@@ -267,8 +275,8 @@ func (wal *WriteAheadLog) GetOffset() int64 {
 	return wal.curOffset
 }
 
-// Sync writes all the data to the disk.
-// Since Sync is a expensive call, calling this often will slow down the throughput.
+// Sync writes all the data to the disk ensuring data durability.
+// Since it is a expensive call, calling this often will slow down the throughput.
 func (wal *WriteAheadLog) Sync() error {
 	err := wal.bufWriter.Flush()
 	if err != nil {
@@ -306,7 +314,7 @@ func (wal *WriteAheadLog) rotateLog() error {
 	return nil
 }
 
-// deleteOldestSegment removes the oldest log file from the logs
+// deleteOldestSegment removes the oldest log file if the number of log files exceeds the limit.
 func (wal *WriteAheadLog) deleteOldestSegment() error {
 	oldestSegment := fmt.Sprintf("%s.%d.*", wal.logFileName, wal.currentSegmentID-wal.maxSegments)
 
@@ -329,6 +337,7 @@ func (wal *WriteAheadLog) deleteOldestSegment() error {
 	return nil
 }
 
+// findStartingLogFile searches for the starting log file during replay.
 func (wal *WriteAheadLog) findStartingLogFile(offset int64, files []string) (i int, previousOffset int64, err error) {
 	i = -1
 	for index, file := range files {
@@ -343,9 +352,10 @@ func (wal *WriteAheadLog) findStartingLogFile(offset int64, files []string) (i i
 		}
 		previousOffset = startingOffset
 	}
-	return -1, -1, errors.New("offset doesn't exsists")
+	return -1, -1, errors.New("offset doesn't exsist")
 }
 
+// seekOffset seeks to a specific offset in the log during replay.
 func (wal *WriteAheadLog) seekOffset(offset int64, startingOffset int64, file bufio.Reader) (n int64, err error) {
 	var readBytes []byte
 	for startingOffset < offset {
@@ -364,6 +374,7 @@ func (wal *WriteAheadLog) seekOffset(offset int64, startingOffset int64, file bu
 	return n, err
 }
 
+// Replay replays log entries starting from the specified offset, invoking the provided callback.
 func (wal *WriteAheadLog) Replay(offset int64, f func([]byte) error) error {
 	logFiles, err := filepath.Glob(wal.logFileName + "*")
 	if err != nil {
@@ -397,6 +408,7 @@ func (wal *WriteAheadLog) Replay(offset int64, f func([]byte) error) error {
 	return nil
 }
 
+// iterateFile iterates through log entries in a file and invokes the provided callback.
 func (wal *WriteAheadLog) iterateFile(bufReader bufio.Reader, callback func([]byte) error) error {
 	var readBytes []byte
 	var err error
