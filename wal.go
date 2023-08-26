@@ -258,12 +258,17 @@ func (wal *WriteAheadLog) Write(data []byte) (int64, error) {
 	return wal.curOffset, nil
 }
 
-// Close closes the underneath storage file, it doesn't flushes data remaining in the memory buffer
-// and file systems in-memory copy of recently written data to file
-// to ensure persistent commit of the log, please use Sync before calling Close.
+// Close closes the underneath storage file, it flushes data remaining in the memory buffer
+// and file systems in-memory copy of recently written data to file to ensure persistent commit of the log
 func (wal *WriteAheadLog) Close() error {
 	wal.mu.Lock()
 	defer wal.mu.Unlock()
+
+	// Flush all data to disk
+	if err := wal.Sync(); err != nil {
+		return err
+	}
+
 	return wal.file.Close()
 }
 
