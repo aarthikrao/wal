@@ -114,7 +114,7 @@ func isDirectoryEmpty(dirPath string) (bool, error) {
 }
 
 func ensureDir(dirName string) error {
-	err := os.Mkdir(dirName, os.ModeDir)
+	err := os.Mkdir(dirName, 0777)
 	if err == nil {
 		return nil
 	}
@@ -133,14 +133,18 @@ func ensureDir(dirName string) error {
 }
 
 func (wal *WriteAheadLog) openExistingOrCreateNew(dirPath string) error {
+	// Create the directory if it doesnt exist
+	err := ensureDir(dirPath)
+	if err != nil {
+		return err
+	}
+
 	empty, err := isDirectoryEmpty(dirPath)
 	if err != nil {
 		return err
 	}
 
 	if empty {
-		// Create the directory if it doesnt exist
-		ensureDir(dirPath)
 
 		// Create the first log file
 		firstLogFileName := wal.logFileName + ".0.0" // prefix + . {segmentID} + . {starting_offset}
