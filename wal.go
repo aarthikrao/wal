@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"math"
 	"os"
@@ -42,7 +43,10 @@ type WALOptions struct {
 	Log *zap.Logger
 }
 
-const lengthBufferSize = 4
+const (
+	lengthBufferSize   = 4
+	checkSumBufferSize = 4
+)
 
 // A Write Ahead Log (WAL) is a data structure used to record changes to a database or
 // any persistent storage system in a sequential and durable manner. This allows for
@@ -248,7 +252,7 @@ func (wal *WriteAheadLog) Write(data []byte) (int64, error) {
 	wal.mu.Lock()
 	defer wal.mu.Unlock()
 
-	entrySize := 4 + len(data) // 4 bytes for the size prefix
+	entrySize := lengthBufferSize + checkSumBufferSize + len(data)
 
 	if wal.logSize+int64(entrySize) > wal.maxLogSize {
 		// Flushing all the in-memory changes to disk, and rotating the log
@@ -270,10 +274,17 @@ func (wal *WriteAheadLog) Write(data []byte) (int64, error) {
 
 	// Write the size prefix to the buffer
 	binary.LittleEndian.PutUint32(wal.sizeBuf[:], uint32(len(data)))
-
 	if _, err := wal.bufWriter.Write(wal.sizeBuf[:]); err != nil {
 		return 0, err
 	}
+
+	// Calculate the checksum and append it to the buffer. We reuse sizeBuf here for checksum also since it is 4 byte
+	checksum := crc32.ChecksumIEEE(data)
+	binary.LittleEndian.PutUint32(wal.sizeBuf[:], checksum)
+	if _, err := wal.bufWriter.Write(wal.sizeBuf[:]); err != nil {
+		return 0, err
+	}
+
 	// Write data payload to the buffer
 	if _, err := wal.bufWriter.Write(data); err != nil {
 		return 0, err
@@ -455,10 +466,27 @@ func (wal *WriteAheadLog) iterateFile(bufReader bufio.Reader, callback func([]by
 		if err != nil {
 			break
 		}
+
+		readBytes, err = bufReader.Peek(checkSumBufferSize)
+		if err != nil {
+			break
+		}
+		diskChecksum := binary.LittleEndian.Uint32(readBytes)
+		_, err = bufReader.Discard(checkSumBufferSize)
+		if err != nil {
+			break
+		}
+
 		readBytes, err = bufReader.Peek(size)
 		if err != nil {
 			break
 		}
+
+		dataChecksum := crc32.ChecksumIEEE(readBytes)
+		if dataChecksum != diskChecksum {
+			return errors.New("checksum mismatch")
+		}
+
 		if err = callback(readBytes); err != nil {
 			break
 		}
