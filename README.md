@@ -79,7 +79,6 @@ func main() {
 ```
 
 ## TODO
-* Start from where we left off during restart
 * Test cases
 * More comments for common people
 
