@@ -41,7 +41,7 @@ func main() {
 
 	wal, err := NewWriteAheadLog(&WALOptions{
 		LogDir:            "data/",
-		MaxLogSize:        40 * 1024 * 1024, // 400 MB (log rotation size)
+		MaxLogSize:        40 * 1024 * 1024, // 40 MB (log rotation size)
 		MaxSegments:       2,
 		Log:               log,
 		MaxWaitBeforeSync: 1 * time.Second,
