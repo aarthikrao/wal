@@ -389,10 +389,10 @@ func (wal *WriteAheadLog) findStartingLogFile(offset int64, files []string) (i i
 		if err != nil {
 			return -1, -1, err
 		}
-		if previousOffset <= offset && offset <= startingOffset {
+
+		if offset <= startingOffset {
 			return index, previousOffset, nil
 		}
-		previousOffset = startingOffset
 	}
 	return -1, -1, errors.New("offset doesn't exsist")
 }
